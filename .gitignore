@@ -38,3 +38,9 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# LangGraph CLI local dev
+.langgraph_api/
+
+# Optional: regenerate with backend/scripts/print_orchestrator_mermaid.py --png
+/graph.png

@@ -16,6 +16,15 @@ class OrchestratorState(TypedDict, total=False):
     parent_node_id: Optional[str]
     user_choice: Optional[str]  # Hint A/B/C or custom; set on resume
     user_input_text: Optional[str]
+    style_tags: Optional[list[str]]  # or pass as list in state for prompt reinforcement
+
+    # ----- Optional long-term fields (filled by session / context services) -----
+    story_world_summary: Optional[str]
+    recent_story_summary: Optional[str]
+    recent_dialogue: Optional[list[str]]
+
+    # ----- Prompt reinforcement output -----
+    reinforced_prompt: Optional[dict]
 
     # ----- Context Assembly output -----
     assembled_context: Optional[dict]  # { global_summary, recent_summary, kg_relations, ... }
@@ -33,6 +42,14 @@ class OrchestratorState(TypedDict, total=False):
 
     # ----- Turn control -----
     is_initial_turn: bool
+
+    # ----- Verify / retry (context_verify -> context_rag loop) -----
+    verify_ok: Optional[bool]
+    rag_retry_count: Optional[int]
+    verify_feedback: Optional[str]
+
+    # ----- Output -----
+    final_segment_text: Optional[str]
 
 
 def merge_state(left: dict, right: dict) -> dict:

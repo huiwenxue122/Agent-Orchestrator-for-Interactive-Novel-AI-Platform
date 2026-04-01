@@ -18,10 +18,11 @@
 | 编排器设计文档 | ✅ | [docs/ORCHESTRATOR_DESIGN.md](./docs/ORCHESTRATOR_DESIGN.md)：状态、节点、图结构、与 FastAPI 对接方式 |
 | 前端 / API Gateway / Session / KG / Hint | ⏳ 待开发 | 按 README_E 分阶段推进 |
 
-**已实现编排流水线（占位逻辑）：**
+**已实现编排流水线 v2（占位逻辑）：**
 
-`parse_instruction` → `context_assembly` → `llm_generate` → `post_process` → `update_state` → `hint_generation` → `wait_for_user`（中断）→ 循环
+`parse_instruction` → `prompt_reinforcement` → `context_rag` → `llm_generate` → `context_verify` →（通过）`output` → `kg_update` → `hint_recommendation` → `user_management` → `wait_for_user`（中断）→ 循环；`context_verify` 不通过则回到 `context_rag` → `llm_generate`（有重试上限）。
 
+- **Knowledge Graph**：在 `context_rag` / `hint_recommendation` 中读，在 `kg_update` 中写（详见设计文档）。
 - 使用 `interrupt_after` 在出 Hint 后等待用户选择，再通过 `Command(resume=...)` 继续下一轮。
 - 使用 Checkpoint 支持按 `thread_id` / `checkpoint_id` 回溯到历史节点重选分支。
 
@@ -39,9 +40,10 @@
     └── app/
         └── services/
             └── orchestrator/   # LangGraph Story Flow 编排器
+                ├── deps.py     # 依赖注入：Session / KG / LLM / Verify / Hint / User
                 ├── state.py    # 状态 schema
                 ├── graph.py    # 建图、invoke/resume/get_state
-                └── nodes/      # 各步骤节点（待接入真实服务）
+                └── nodes/      # 各步骤节点（调用 deps 中的协议实现）
 ```
 
 ---

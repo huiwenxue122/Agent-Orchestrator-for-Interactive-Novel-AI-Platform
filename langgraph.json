@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "story_flow": "./langgraph_entry.py:story_flow_graph"
+  },
+  "env": "./.env"
+}

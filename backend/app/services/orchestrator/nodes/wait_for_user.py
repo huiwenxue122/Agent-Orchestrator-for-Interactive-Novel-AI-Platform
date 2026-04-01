@@ -1,13 +1,12 @@
 """
-Wait-for-user node: no-op. interrupt_after this node; on resume, user_choice/user_input_text merged and flow goes to parse_instruction.
+Wait for user — no-op body; interrupt_after this node for Human-in-the-Loop.
 """
 from __future__ import annotations
+
+from langchain_core.runnables import RunnableConfig
 
 from ..state import OrchestratorState
 
 
-def wait_for_user(state: OrchestratorState) -> dict:
-    """
-    Pass-through. After this node we interrupt; when resumed, Command(resume={...}) merges into state and next node is parse_instruction.
-    """
+def wait_for_user(state: OrchestratorState, config: RunnableConfig) -> dict:
     return {}
