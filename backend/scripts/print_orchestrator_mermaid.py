@@ -2,15 +2,22 @@
 """
 Print the compiled Story Flow graph as Mermaid (static structure).
 
-Usage (from repo root):
+Usage (from **repository root**, i.e. the folder that contains ``backend/``):
+
   PYTHONPATH=backend python backend/scripts/print_orchestrator_mermaid.py
   PYTHONPATH=backend python backend/scripts/print_orchestrator_mermaid.py --out orchestrator_graph.mmd
-
-Paste the output into https://mermaid.live to render.
-
-PNG (optional): needs system Graphviz + ``pip install pygraphviz`` (or LangGraph's bundled renderer):
-
   PYTHONPATH=backend python backend/scripts/print_orchestrator_mermaid.py --png graph.png
+
+From inside ``backend/`` use:
+
+  PYTHONPATH=. python scripts/print_orchestrator_mermaid.py --png graph.png
+
+Not valid: ``python scripts/...`` from repo root (file lives under ``backend/scripts/``).
+Not valid: ``python backend/scripts/...`` from inside ``backend/`` (doubles ``backend/``).
+
+Paste Mermaid output into https://mermaid.live to render.
+
+PNG (optional): needs system Graphviz + ``pip install pygraphviz`` (or LangGraph's bundled renderer).
 
 This shows the LangGraph orchestration topology, not Neo4j Aura data.
 """

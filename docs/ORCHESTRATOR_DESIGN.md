@@ -4,20 +4,17 @@
 
 ---
 
-## 0. 图结构 v2（当前实现）
+## 0. 图结构 v3（当前实现）
 
-### 0.1 逻辑关系总览（含 Knowledge Graph）
-
-你们讨论的新结构可以整理为三条「关系」+ 一条主执行链：
+### 0.1 逻辑关系总览
 
 | 关系 | 含义 |
 |------|------|
-| **主链（生成）** | `START` → `prompt_reinforcement` → `context_rag` → `llm` → `context_verify` →（通过）→ `output` →（更新）→ **Knowledge Graph** |
-| **校验失败回路** | `context_verify` →（不通过）→ `context_rag` → `llm` → `context_verify` … |
-| **Hint / 用户** | `hint_recommendation` → `user_management`；Hint 侧依赖 **Knowledge Graph**（读） |
-| **KG 读写** | `context_rag`、`hint_recommendation` **读 KG**；`output` 之后 **写 KG**（本仓库用独立节点 `kg_update` 表达「写」） |
-
-> **说明**：图上的「同时 start → hint recommendation → user management」表示 **产品/架构上** Hint 与用户偏好是一条独立能力线；在 **单次剧情生成回合** 里，Hint 必须在「本段正文已产出」之后才有意义，因此 **运行时主图** 采用顺序：`output` → `kg_update` → `hint_recommendation` → `user_management` → `wait_for_user`。若将来要在会话初始化时预拉用户画像，可另建 **并行子图** 或独立 API，在 `START` 分叉后于 `prompt_reinforcement` 前做 **fan-in**（见 0.4）。
+| **主生成链** | `parse` → `prompt_reinforcement` → `context_rag` → **`assemble_prompt`** → `llm_generate` → `context_verify` |
+| **通过后** | `ok` → `output` → **`post_output_tasks`**（`kg_update` → `hint_recommendation` → `user_management`）→ `wait_for_user` |
+| **可恢复失败** | `verify_status=retry` → **`retry_guard`** → 未超 `max_retries` 则回 `context_rag`；否则 → **`ask_clarification`** |
+| **不可恢复失败** | `verify_status=fail` → **`ask_clarification`** → `wait_for_user` |
+| **语义** | `assembled_context` = 检索材料；`assembled_prompt` = 给 LLM 的最终 system/user（便于 LangSmith 审计） |
 
 ### 0.2 主图（Mermaid）
 
@@ -26,50 +23,37 @@ flowchart TD
     START([START]) --> parse[parse_instruction]
     parse --> pr[prompt_reinforcement]
     pr --> rag[context_rag]
-    rag --> llm[llm_generate]
+    rag --> ap[assemble_prompt]
+    ap --> llm[llm_generate]
     llm --> verify[context_verify]
     verify -->|ok| out[output]
-    verify -->|not ok| rag
-    out --> kg[kg_update]
-    kg --> hint[hint_recommendation]
-    hint --> um[user_management]
-    um --> wait[wait_for_user]
+    verify -->|retry| rg[retry_guard]
+    verify -->|fail| ask[ask_clarification]
+    rg -->|retry_allowed| rag
+    rg -->|retry_exhausted| ask
+    out --> pot[post_output_tasks]
+    pot --> wait[wait_for_user]
+    ask --> wait
     wait --> parse
 
-    subgraph KG["Knowledge Graph（跨节点读写）"]
-        direction TB
+    subgraph KG["Knowledge Graph"]
         rag -.->|read| KG
-        hint -.->|read| KG
-        kg -.->|write| KG
+        pot -.->|write inside kg_update| KG
     end
 ```
 
 ### 0.3 ASCII（与代码节点名一致）
 
 ```
-  START
-    │
-    ▼
-parse_instruction ──► prompt_reinforcement ──► context_rag ◄────┐
-    ▲                      │ read KG (in rag)                    │
-    │                      ▼                                     │ not ok
-    │                 llm_generate                               │
-    │                      ▼                                     │
-    │                 context_verify ── ok ──► output              │
-    │                      │                     │               │
-    │                      │                     ▼               │
-    │                      │                kg_update ── write KG  │
-    │                      │                     │               │
-    │                      │                     ▼               │
-    │                      │         hint_recommendation ─ read KG│
-    │                      │                     │               │
-    │                      │                     ▼               │
-    │                      │            user_management          │
-    │                      │                     │               │
-    │                      │                     ▼               │
-    │                      └──── not ok ────────┘      wait_for_user
-    │                              │                  (interrupt)
-    └──────────────────────────────┴──────────────────────┘
+  START → parse_instruction → prompt_reinforcement → context_rag
+              ↑                                              │
+              │         assemble_prompt → llm_generate → context_verify
+              │              ↑              │                │
+              │              │              │    ok ──► output ──► post_output_tasks ──► wait_for_user
+              │              │              │    retry ──► retry_guard ──┬─► context_rag
+              │              │              │    fail ──► ask_clarification ┘ exhausted
+              │              │              │                              └──► ask_clarification
+              └──────────────┴────────────── wait_for_user (interrupt) ────────┘
 ```
 
 ### 0.4 与「双起点」图的对应方式
@@ -83,16 +67,17 @@ parse_instruction ──► prompt_reinforcement ──► context_rag ◄──
 
 | 节点 | 职责 |
 |------|------|
-| `parse_instruction` | Session / IF-Line 校验；每轮重置 `rag_retry_count` |
-| `prompt_reinforcement` | 用户意图 + 风格约束注入 Prompt |
-| `context_rag` | 滑动窗口 + 向量检索 + **KG 查询**，组装上下文 |
-| `llm_generate` | 流式生成正文 |
-| `context_verify` | 安全 / 风格 / **逻辑与 KG 一致性**；失败则回到 `context_rag`（有次数上限） |
-| `output` | 对外输出的最终段落字段（如 `final_segment_text`） |
-| `kg_update` | 根据本段正文 **更新 KG**（实体/关系/快照） |
-| `hint_recommendation` | 结合正文 + KG + 张力等生成 3 个 Hint |
-| `user_management` | 记录选择偏好、探索/利用计数等 |
-| `wait_for_user` | `interrupt_after`；resume 后继续 `parse_instruction` |
+| `parse_instruction` | Session 校验；重置 `retry_count`、`verify_*`、`assembled_prompt` 等 |
+| `prompt_reinforcement` | 用户意图 + 风格 → `reinforced_prompt` |
+| `context_rag` | 检索 + **KG 读** → `assembled_context` |
+| `assemble_prompt` | 合并 reinforced + 玩家原文优先 + 上下文 + 重试修正 → `assembled_prompt` |
+| `llm_generate` | 只读 `assembled_prompt` 调模型 → `generated_text` |
+| `context_verify` | 设置 `verify_status`：`ok` / `retry` / `fail` |
+| `retry_guard` | `retry_count` 与 `max_retries`；允许则回 `context_rag` |
+| `ask_clarification` | `clarification_question` + `final_segment_text`；跳过 post-output side effects |
+| `output` | `verify ok` 时定稿 `final_segment_text` |
+| `post_output_tasks` | **副作用链**：`kg_update` → `hint_recommendation` → `user_management` |
+| `wait_for_user` | `interrupt_after`；resume → `parse_instruction` |
 
 ---
 
@@ -139,11 +124,17 @@ class OrchestratorState(TypedDict, total=False):
 
     reinforced_prompt: Optional[dict]
     assembled_context: Optional[dict]
+    assembled_prompt: Optional[dict]  # system / user / meta
     generated_text: Optional[str]
     post_processed_text: Optional[str]
     verify_ok: Optional[bool]
-    rag_retry_count: Optional[int]
+    verify_status: Optional[str]
     verify_feedback: Optional[str]
+    retry_count: Optional[int]
+    max_retries: Optional[int]
+    rag_retry_count: Optional[int]  # 与 retry_count 同步，兼容旧读者
+    clarification_question: Optional[str]
+    side_effects_status: Optional[str]
     final_segment_text: Optional[str]
 
     kg_snapshot_id: Optional[str]
@@ -158,16 +149,21 @@ class OrchestratorState(TypedDict, total=False):
 
 ```
 backend/app/services/orchestrator/
-├── deps.py           # OrchestratorDeps + Protocol 与默认实现（Session / KG / LLM / Verify / Hint / User）
+├── constants.py      # VERIFY_ROUTE_*、RETRY_GUARD_*、DEFAULT_MAX_RETRIES
+├── deps.py           # OrchestratorDeps、VerifyResult(outcome)
 ├── state.py
-├── graph.py          # 建图、invoke / resume（可传 orchestrator_deps、llm_stream_callback）
+├── graph.py
 └── nodes/
     ├── parse.py
     ├── prompt_reinforcement.py
     ├── context_rag.py
+    ├── assemble_prompt.py
     ├── llm.py
     ├── context_verify.py
+    ├── retry_guard.py
+    ├── ask_clarification.py
     ├── output.py
+    ├── post_output_tasks.py
     ├── kg_update.py
     ├── hint_recommendation.py
     ├── user_management.py
@@ -267,6 +263,8 @@ export OPENAI_API_KEY=你的_OpenAI_Key   # 若要走真实 LLM
 
 ---
 
-## 7. 旧版流水线（参考，已由 v2 替代）
+## 7. 历史版本（参考）
 
-原先线性结构为：`parse_instruction` → `context_assembly` → `llm_generate` → `post_process` → `update_state` → `hint_generation` → `wait_for_user`。v2 将其拆解为 **prompt_reinforcement**、**context_rag**、**context_verify 回路**、**output**、**kg_update**，并将 Hint 与用户管理显式串联在 KG 更新之后。
+- **v1**：`context_assembly` → `post_process` → `update_state` → `hint_generation` …  
+- **v2**：加入 `prompt_reinforcement`、`context_rag`、`context_verify` 直连重试、`kg_update` 链式 Hint。  
+- **v3（当前）**：`assemble_prompt`、`retry_guard`、`ask_clarification`、`post_output_tasks`，`VerifyResult.outcome` 三分支路由。

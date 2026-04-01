@@ -8,18 +8,30 @@ import os
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
+from .constants import VERIFY_ROUTE_FAIL, VERIFY_ROUTE_OK, VERIFY_ROUTE_RETRY
 from .state import OrchestratorState
+
+VerifyOutcome = Literal["ok", "retry", "fail"]
 
 
 class VerifyResult:
-    __slots__ = ("ok", "feedback", "filtered_text")
+    __slots__ = ("outcome", "feedback", "filtered_text")
 
-    def __init__(self, ok: bool, feedback: str | None = None, filtered_text: str | None = None):
-        self.ok = ok
+    def __init__(
+        self,
+        outcome: VerifyOutcome,
+        feedback: str | None = None,
+        filtered_text: str | None = None,
+    ):
+        self.outcome = outcome
         self.feedback = feedback
         self.filtered_text = filtered_text
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome == VERIFY_ROUTE_OK
 
 
 # ----- Protocols -----
@@ -198,21 +210,21 @@ class OpenAIStoryLLM:
 
 
 class DefaultVerifyService:
-    """Safety (lightweight) + optional empty-text retry trigger."""
+    """Safety (lightweight) + recoverable vs blocking outcomes for routing."""
 
     _BLOCK = re.compile(r"\b(kill yourself|suicide)\b", re.I)
 
     def verify(self, state: OrchestratorState, text: str) -> VerifyResult:
         t = (text or "").strip()
         if not t:
-            return VerifyResult(ok=False, feedback="empty_generation", filtered_text=t)
+            return VerifyResult(VERIFY_ROUTE_RETRY, feedback="empty_generation", filtered_text=t)
         if self._BLOCK.search(t):
             return VerifyResult(
-                ok=False,
+                VERIFY_ROUTE_FAIL,
                 feedback="safety_block",
                 filtered_text="[Segment withheld by safety filter.]",
             )
-        return VerifyResult(ok=True, feedback=None, filtered_text=t)
+        return VerifyResult(VERIFY_ROUTE_OK, feedback=None, filtered_text=t)
 
 
 class DefaultHintService:

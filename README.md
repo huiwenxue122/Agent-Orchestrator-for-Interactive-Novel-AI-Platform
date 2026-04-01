@@ -1,77 +1,178 @@
-# 殊途 (Shutu) — Interactive Novel AI Platform
+# Agent Orchestrator for Interactive Novel AI Platform (Shutu)
 
-> **「殊途同归」** — 人人可书写自己的故事线。
+Interactive fiction platform: **context memory**, **knowledge-graph-aware RAG**, **hint recommendation**, and an **IF-Line** (branching narrative) experience. Product vision, data flow, and MVP phases are in **[README_E.md](./README_E.md)**.
 
-基于 AI 的互动小说平台：通过**上下文记忆引擎**保证叙事连贯，通过**智能 Hint 推荐**降低创作门槛，提供沉浸式 IF-Line 分支叙事体验。
-
-- 完整架构与模块说明见 **[README_E.md](./README_E.md)**（英文）
+This README focuses on the **LangGraph Story Flow orchestrator** implemented in Python.
 
 ---
 
-## 当前进展
+## LangGraph Story Flow (v3)
 
-| 模块 | 状态 | 说明 |
-|------|------|------|
-| 架构文档 | ✅ | README_E.md：系统架构、数据流、Tech Stack、MVP 分阶段计划 |
-| 依赖清单 | ✅ | `requirements.txt`（FastAPI、LangGraph、LlamaIndex、Neo4j、Redis 等） |
-| Story Flow Orchestrator | 🚧 骨架完成 | 基于 **LangGraph** 的剧情编排图（Checkpoint + Human-in-the-Loop） |
-| 编排器设计文档 | ✅ | [docs/ORCHESTRATOR_DESIGN.md](./docs/ORCHESTRATOR_DESIGN.md)：状态、节点、图结构、与 FastAPI 对接方式 |
-| 前端 / API Gateway / Session / KG / Hint | ⏳ 待开发 | 按 README_E 分阶段推进 |
+The orchestrator is a **compiled `StateGraph`** with checkpointing (local dev) or platform-managed persistence (`langgraph dev` / LangSmith Studio). A full turn ends with **`interrupt_after`** on `wait_for_user`; the client resumes with `Command(resume=...)` and the graph loops back to `parse_instruction`.
 
-**已实现编排流水线 v2（占位逻辑）：**
+### Topology (Mermaid)
 
-`parse_instruction` → `prompt_reinforcement` → `context_rag` → `llm_generate` → `context_verify` →（通过）`output` → `kg_update` → `hint_recommendation` → `user_management` → `wait_for_user`（中断）→ 循环；`context_verify` 不通过则回到 `context_rag` → `llm_generate`（有重试上限）。
+The diagram below matches the runtime graph (same nodes and edges).  
+*(If you use `print_orchestrator_mermaid.py`, LangGraph may also draw a decorative dashed edge from `context_verify` to `__end__`; that is not an application-defined branch.)*
 
-- **Knowledge Graph**：在 `context_rag` / `hint_recommendation` 中读，在 `kg_update` 中写（详见设计文档）。
-- 使用 `interrupt_after` 在出 Hint 后等待用户选择，再通过 `Command(resume=...)` 继续下一轮。
-- 使用 Checkpoint 支持按 `thread_id` / `checkpoint_id` 回溯到历史节点重选分支。
+```mermaid
+flowchart TD
+    subgraph Generation["Main generation chain"]
+        P[parse_instruction] --> PR[prompt_reinforcement]
+        PR --> CR[context_rag]
+        CR --> AP[assemble_prompt]
+        AP --> LLM[llm_generate]
+        LLM --> CV[context_verify]
+    end
+
+    CV -->|ok| OUT[output]
+    CV -->|retry| RG[retry_guard]
+    CV -->|fail| ASK[ask_clarification]
+
+    RG -->|retry_allowed| CR
+    RG -->|retry_exhausted| ASK
+
+    OUT --> POT[post_output_tasks]
+    POT --> WU[wait_for_user]
+    ASK --> WU
+    WU --> P
+```
+
+`post_output_tasks` runs **sequentially**: `kg_update` → `hint_recommendation` → `user_management`.
+
+### Node responsibilities
+
+| Node | Role |
+|------|------|
+| `parse_instruction` | Validates session; resets per-turn fields (`retry_count`, `verify_*`, `assembled_prompt`, …). |
+| `prompt_reinforcement` | Builds `reinforced_prompt` (user branch + style). |
+| `context_rag` | Retrieves context + **KG read** → `assembled_context` (materials, not the final LLM prompt). |
+| `assemble_prompt` | **Single place** that builds `assembled_prompt` `{ system, user, meta }` for traceability (player text first, then task, then context; retry hints from `verify_feedback` when `retry_count > 0`). |
+| `llm_generate` | Calls the injected LLM using **only** `assembled_prompt`. |
+| `context_verify` | Sets `verify_status` ∈ `{ ok, retry, fail }` via injected `VerifyService` (`VerifyResult.outcome`). |
+| `retry_guard` | If `verify_status == retry`, either increments `retry_count` and routes to `context_rag`, or routes to `ask_clarification` when `retry_count >= max_retries`. |
+| `ask_clarification` | User-visible clarification when verify **fails** or retries are **exhausted**; skips KG/hint side effects (`side_effects_status: skipped`). |
+| `output` | On **ok**, sets `final_segment_text` from vetted text. |
+| `post_output_tasks` | **Post-output only**: `kg_update` → `hint_recommendation` → `user_management`, then `side_effects_status: done`. |
+| `wait_for_user` | Human-in-the-loop interrupt; next resume continues the session. |
+
+### Routing constants
+
+Defined in `backend/app/services/orchestrator/constants.py`:
+
+- Verify: `ok`, `retry`, `fail`
+- Retry guard: `retry_allowed`, `retry_exhausted` (stored in state as `retry_guard_route`, identical to conditional-edge keys)
+
+### Default verification behavior
+
+`DefaultVerifyService` checks **generated text** only: empty → **retry**, a small safety regex → **fail**, else **ok**. It does **not** detect logical contradictions or “adversarial” user instructions; extend `VerifyService` for KG/consistency or model-based judges.
+
+### Dependency injection
+
+`OrchestratorDeps` (`deps.py`) groups protocols/implementations: session, prompt, context RAG, KG, LLM, verify, hints, users. Pass at invoke time:
+
+```python
+config = {"configurable": {"thread_id": session_id, "orchestrator_deps": my_deps}}
+```
 
 ---
 
-## 项目结构
+## Repository layout
 
 ```
-├── README.md              # 本文件（项目简介 + 当前进展）
-├── README_E.md            # 完整架构设计（英文）
-├── requirements.txt      # Python 依赖
+├── README.md                 # This file
+├── README.zh.md              # Short Chinese pointer
+├── README_E.md               # Product / architecture (English)
+├── langgraph.json            # LangGraph CLI / `langgraph dev`
+├── langgraph_entry.py        # Studio entry (graph without custom checkpointer)
+├── requirements.txt
 ├── docs/
-│   └── ORCHESTRATOR_DESIGN.md   # 编排器设计与实现说明
+│   └── ORCHESTRATOR_DESIGN.md
 └── backend/
-    └── app/
-        └── services/
-            └── orchestrator/   # LangGraph Story Flow 编排器
-                ├── deps.py     # 依赖注入：Session / KG / LLM / Verify / Hint / User
-                ├── state.py    # 状态 schema
-                ├── graph.py    # 建图、invoke/resume/get_state
-                └── nodes/      # 各步骤节点（调用 deps 中的协议实现）
+    ├── app/services/orchestrator/
+    │   ├── graph.py          # build_story_flow_graph, invoke_new_turn, …
+    │   ├── state.py          # OrchestratorState
+    │   ├── deps.py           # OrchestratorDeps, VerifyResult
+    │   ├── constants.py      # route string constants
+    │   └── nodes/            # One module per node + post_output_tasks
+    ├── scripts/
+    │   ├── print_orchestrator_mermaid.py
+    │   └── run_orchestrator_langsmith.py
+    └── tests/
+        └── test_orchestrator_graph.py
 ```
 
 ---
 
-## 本地运行
+## Generate the structure diagram
+
+From the **repository root** (the directory that contains `backend/`):
 
 ```bash
-# 创建虚拟环境并安装依赖
+# Mermaid text → paste into https://mermaid.live
+PYTHONPATH=backend python backend/scripts/print_orchestrator_mermaid.py
+
+# Save to file
+PYTHONPATH=backend python backend/scripts/print_orchestrator_mermaid.py --out orchestrator_graph.mmd
+
+# PNG (requires Graphviz; optional pygraphviz)
+PYTHONPATH=backend python backend/scripts/print_orchestrator_mermaid.py --png graph.png
+```
+
+From inside `backend/`:
+
+```bash
+PYTHONPATH=. python scripts/print_orchestrator_mermaid.py
+```
+
+---
+
+## Run locally
+
+```bash
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 在项目根目录验证编排器（需设置 PYTHONPATH）
+# Smoke test (stub LLM if OPENAI_API_KEY unset)
 PYTHONPATH=backend python -c "
-from app.services.orchestrator import invoke_new_turn, resume_with_choice
-r = invoke_new_turn('test-session', {'session_id': 'test-session', 'current_node_id': 'root', 'is_initial_turn': True})
-print('Hints:', r.get('hints'))
+from app.services.orchestrator import invoke_new_turn, default_orchestrator_deps
+deps = default_orchestrator_deps()
+r = invoke_new_turn('demo', {
+    'session_id': 'demo',
+    'current_node_id': 'root',
+    'story_world_summary': 'A foggy forest at dusk.',
+}, deps=deps)
+print('final_segment_text:', (r.get('final_segment_text') or '')[:120])
+print('hints:', r.get('hints'))
 "
+
+# Unit tests
+cd backend && python -m unittest tests.test_orchestrator_graph -v
 ```
+
+### LangSmith tracing
+
+Set `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, and optionally `LANGSMITH_PROJECT` in `.env`, then:
+
+```bash
+PYTHONPATH=backend python backend/scripts/run_orchestrator_langsmith.py
+```
+
+### LangGraph Studio
+
+```bash
+pip install "langgraph-cli[inmem]"
+langgraph dev
+```
+
+Open the Studio URL printed in the terminal (points at `http://127.0.0.1:2024` by default). Graph id: **`story_flow`**.
 
 ---
 
-## 后续计划（参考 README_E MVP）
+## Environment variables
 
-1. **Phase 1**：FastAPI 入口、Session 管理、简单 Prompt + LLM 接入、基础 Hint 生成、简易前端。
-2. **Phase 2**：Neo4j 知识图谱、三层摘要、KG RAG、一致性校验。
-3. **Phase 3**：Hint 多维度候选、用户偏好学习、多样性/惊喜平衡、情绪节奏追踪。
-4. **Phase 4**：多模型、IF-Line 时间线可视化、社区分享、多语言。
+Copy `.env.example` to `.env`. Typical keys: `OPENAI_API_KEY`, `ORCHESTRATOR_LLM_MODEL`, LangSmith variables, and (when wired) Neo4j Aura URI/credentials.
 
 ---
 

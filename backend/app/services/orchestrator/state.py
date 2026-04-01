@@ -26,14 +26,17 @@ class OrchestratorState(TypedDict, total=False):
     # ----- Prompt reinforcement output -----
     reinforced_prompt: Optional[dict]
 
-    # ----- Context Assembly output -----
-    assembled_context: Optional[dict]  # { global_summary, recent_summary, kg_relations, ... }
+    # ----- Context RAG (retrieved / structured context materials, not final LLM prompt) -----
+    assembled_context: Optional[dict]
+
+    # ----- Explicit LLM input (built by assemble_prompt; primary input for llm_generate) -----
+    assembled_prompt: Optional[dict]  # { "system": str, "user": str, "meta"?: dict }
 
     # ----- LLM & post-process -----
     generated_text: Optional[str]
     post_processed_text: Optional[str]
 
-    # ----- Update State output -----
+    # ----- Update State output (post-output side effects) -----
     kg_snapshot_id: Optional[str]
     emotion_tone: Optional[str]
 
@@ -43,10 +46,22 @@ class OrchestratorState(TypedDict, total=False):
     # ----- Turn control -----
     is_initial_turn: bool
 
-    # ----- Verify / retry (context_verify -> context_rag loop) -----
-    verify_ok: Optional[bool]
-    rag_retry_count: Optional[int]
+    # ----- Verify & retry (context_verify + retry_guard) -----
+    verify_ok: Optional[bool]  # backward compat: True iff verify_status == "ok"
+    verify_status: Optional[str]  # "ok" | "retry" | "fail" | "clarification" (after ask_clarification)
     verify_feedback: Optional[str]
+    retry_count: Optional[int]  # increments in retry_guard when a retry is granted
+    max_retries: Optional[int]  # default applied in retry_guard if missing
+    retry_guard_route: Optional[str]  # RETRY_GUARD_ALLOWED | RETRY_GUARD_EXHAUSTED (see constants.py)
+
+    # Deprecated alias: kept for backward compat with older traces/docs; mirror retry_count in parse
+    rag_retry_count: Optional[int]
+
+    # ----- Clarification path (verify fail or retry exhausted) -----
+    clarification_question: Optional[str]
+
+    # ----- Post-output side effects -----
+    side_effects_status: Optional[str]  # e.g. "done" | "skipped"
 
     # ----- Output -----
     final_segment_text: Optional[str]

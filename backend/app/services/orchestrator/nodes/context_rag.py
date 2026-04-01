@@ -1,5 +1,5 @@
 """
-Context RAG — sliding-window-style fields + Knowledge Graph read for this turn.
+Context RAG — retrieval + KG read; outputs ``assembled_context`` (materials, not final LLM prompt).
 """
 from __future__ import annotations
 
@@ -28,7 +28,4 @@ def context_rag(state: OrchestratorState, config: RunnableConfig) -> dict:
         "kg_relations": kg_relations,
         "context_json": _context_blob({**base, "kg_relations": kg_relations}),
     }
-    feedback = state.get("verify_feedback")
-    if feedback and state.get("rag_retry_count", 0) > 0:
-        assembled["verify_retry_feedback"] = feedback
     return {"assembled_context": assembled}

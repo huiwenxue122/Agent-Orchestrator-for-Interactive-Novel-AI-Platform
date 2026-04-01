@@ -1,9 +1,13 @@
 """
-Story Flow Orchestrator — LangGraph (v2).
+Story Flow Orchestrator — LangGraph (v3).
 
-Main path: parse -> prompt_reinforcement -> context_rag -> llm -> context_verify
-  -> (ok) output -> kg_update -> hint_recommendation -> user_management -> wait_for_user -> parse
-  -> (not ok) context_rag -> llm (retry loop, capped)
+Main quality chain:
+  parse → prompt_reinforcement → context_rag → assemble_prompt → llm_generate → context_verify
+
+Routing:
+  verify ok → output → post_output_tasks (side effects) → wait_for_user → parse
+  verify retry → retry_guard → context_rag | ask_clarification
+  verify fail → ask_clarification → wait_for_user → parse
 
 Inject services via config["configurable"]["orchestrator_deps"] (see deps.OrchestratorDeps).
 Optional streaming: config["configurable"]["llm_stream_callback"] = callable(str) -> None.
@@ -19,6 +23,13 @@ except ImportError:
 from langgraph.graph import START, StateGraph
 from langgraph.types import Command
 
+from .constants import (
+    RETRY_GUARD_ALLOWED,
+    RETRY_GUARD_EXHAUSTED,
+    VERIFY_ROUTE_FAIL,
+    VERIFY_ROUTE_OK,
+    VERIFY_ROUTE_RETRY,
+)
 from .deps import OrchestratorDeps
 from .state import OrchestratorState
 from .nodes import (
@@ -27,18 +38,31 @@ from .nodes import (
 )
 from .nodes.prompt_reinforcement import prompt_reinforcement
 from .nodes.context_rag import context_rag
+from .nodes.assemble_prompt import assemble_prompt
 from .nodes.llm import llm_generate
 from .nodes.context_verify import context_verify
+from .nodes.retry_guard import retry_guard
+from .nodes.ask_clarification import ask_clarification
 from .nodes.output import output
-from .nodes.kg_update import kg_update
-from .nodes.hint_recommendation import hint_recommendation
-from .nodes.user_management import user_management
+from .nodes.post_output_tasks import post_output_tasks
 
 
-def _route_after_verify(state: OrchestratorState) -> str:
-    if state.get("verify_ok"):
-        return "ok"
-    return "retry"
+def route_after_verify(state: OrchestratorState) -> str:
+    vs = state.get("verify_status")
+    if vs == VERIFY_ROUTE_OK:
+        return VERIFY_ROUTE_OK
+    if vs == VERIFY_ROUTE_RETRY:
+        return VERIFY_ROUTE_RETRY
+    if vs == VERIFY_ROUTE_FAIL:
+        return VERIFY_ROUTE_FAIL
+    return VERIFY_ROUTE_FAIL
+
+
+def route_after_retry_guard(state: OrchestratorState) -> str:
+    r = state.get("retry_guard_route")
+    if r == RETRY_GUARD_ALLOWED:
+        return RETRY_GUARD_ALLOWED
+    return RETRY_GUARD_EXHAUSTED
 
 
 def build_story_flow_graph(checkpointer=None, *, for_langgraph_api: bool = False):
@@ -54,33 +78,44 @@ def build_story_flow_graph(checkpointer=None, *, for_langgraph_api: bool = False
     workflow.add_node("parse_instruction", parse_instruction)
     workflow.add_node("prompt_reinforcement", prompt_reinforcement)
     workflow.add_node("context_rag", context_rag)
+    workflow.add_node("assemble_prompt", assemble_prompt)
     workflow.add_node("llm_generate", llm_generate)
     workflow.add_node("context_verify", context_verify)
+    workflow.add_node("retry_guard", retry_guard)
+    workflow.add_node("ask_clarification", ask_clarification)
     workflow.add_node("output", output)
-    workflow.add_node("kg_update", kg_update)
-    workflow.add_node("hint_recommendation", hint_recommendation)
-    workflow.add_node("user_management", user_management)
+    workflow.add_node("post_output_tasks", post_output_tasks)
     workflow.add_node("wait_for_user", wait_for_user)
 
     workflow.add_edge(START, "parse_instruction")
     workflow.add_edge("parse_instruction", "prompt_reinforcement")
     workflow.add_edge("prompt_reinforcement", "context_rag")
-    workflow.add_edge("context_rag", "llm_generate")
+    workflow.add_edge("context_rag", "assemble_prompt")
+    workflow.add_edge("assemble_prompt", "llm_generate")
     workflow.add_edge("llm_generate", "context_verify")
 
     workflow.add_conditional_edges(
         "context_verify",
-        _route_after_verify,
+        route_after_verify,
         {
-            "ok": "output",
-            "retry": "context_rag",
+            VERIFY_ROUTE_OK: "output",
+            VERIFY_ROUTE_RETRY: "retry_guard",
+            VERIFY_ROUTE_FAIL: "ask_clarification",
         },
     )
 
-    workflow.add_edge("output", "kg_update")
-    workflow.add_edge("kg_update", "hint_recommendation")
-    workflow.add_edge("hint_recommendation", "user_management")
-    workflow.add_edge("user_management", "wait_for_user")
+    workflow.add_conditional_edges(
+        "retry_guard",
+        route_after_retry_guard,
+        {
+            RETRY_GUARD_ALLOWED: "context_rag",
+            RETRY_GUARD_EXHAUSTED: "ask_clarification",
+        },
+    )
+
+    workflow.add_edge("output", "post_output_tasks")
+    workflow.add_edge("post_output_tasks", "wait_for_user")
+    workflow.add_edge("ask_clarification", "wait_for_user")
     workflow.add_edge("wait_for_user", "parse_instruction")
 
     if for_langgraph_api:
