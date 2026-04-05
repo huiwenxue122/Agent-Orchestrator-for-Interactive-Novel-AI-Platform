@@ -1,4 +1,4 @@
-# Agent Orchestrator for Interactive Novel AI Platform (Shutu)
+# Agent Orchestrator for Interactive Novel AI Platform (StoryWeaver)
 
 Interactive fiction platform: **context memory**, **knowledge-graph-aware RAG**, **hint recommendation**, and an **IF-Line** (branching narrative) experience. Product vision, data flow, and MVP phases are in **[README_E.md](./README_E.md)**.
 
