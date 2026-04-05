@@ -38,7 +38,31 @@ flowchart TD
     WU --> P
 ```
 
-`post_output_tasks` runs **sequentially**: `kg_update` → `hint_recommendation` → `user_management`.
+In the compiled graph, `post_output_tasks` is a **single node**. Inside that node, the implementation runs three helpers **in order** and then sets `side_effects_status` to `done` (see `backend/app/services/orchestrator/nodes/post_output_tasks.py`).
+
+#### `post_output_tasks` internal structure (Mermaid)
+
+```mermaid
+flowchart TB
+    subgraph post_output_tasks["post_output_tasks (one LangGraph node)"]
+        direction TB
+        KU[kg_update]
+        HR[hint_recommendation]
+        UM[user_management]
+        DONE["side_effects_status = done"]
+        KU --> HR
+        HR --> UM
+        UM --> DONE
+    end
+
+    IN([incoming state]) --> KU
+    DONE --> OUT([merged state updates])
+```
+
+- **`kg_update`** — Writes the finalized segment to the KG (`apply_segment`), notifies the session (`on_segment_committed`), and sets `kg_snapshot_id` and `emotion_tone` from the segment.
+- **`hint_recommendation`** — Runs on the merged state; sets `hints` via `HintService.suggest`.
+- **`user_management`** — Runs after hints exist; calls `UserManagementService.on_hints_presented`.
+- The node returns the accumulated updates; **`side_effects_status: done`** marks successful completion of this chain (skipped on the clarification path).
 
 ### Node responsibilities
 
